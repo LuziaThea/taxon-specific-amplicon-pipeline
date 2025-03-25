@@ -1,0 +1,109 @@
+---
+title: "16S taxonomy"
+output: html_notebook
+---
+
+# Assign taxonomy to 16S using dada2 tax functions and SILVA v138 db
+
+Note: As of Silva version 138, the official DADA2-formatted reference fastas are optimized for classification of Bacteria and Archaea, and are not suitable for classifying Eukaryotes.  
+
+
+```{r eval=FALSE, message = FALSE, warning = FALSE}
+
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(dada2)
+
+path <- paste(HOME,"Dataset1_dada2_workflow", sep = "/") # Path to input and output files
+path_tax <- paste(HOME,"Tax_db", sep = "/") # Path to tax ref files
+
+### read asv
+asv <- read.table(file.path(path, "LSP48_LSP49_asv.fa"), header = F)
+asv <- data.frame(header = sub(asv[seq(1, nrow(asv)-1, by = 2),1], pattern = ">", replacement = ""),
+                         sequence = asv[seq(2, nrow(asv), by = 2),1] )
+
+# assign taxonomy and species
+taxa <- assignTaxonomy(asv$sequence, 
+                       file.path(path_tax,"silva_nr99_v138.1_train_set.fa.gz"), multithread=TRUE, outputBootstraps = TRUE)
+saveRDS(taxa, file.path(path_tax, "LSP48_LSP49_silva_genus_assignment_v138.rds") )
+
+# add species
+taxa_sp <- data.frame(addSpecies(taxtab = taxa[[1]], 
+                      refFasta = file.path(path_tax,"silva_species_assignment_v138.1.fa.gz"), tryRC = TRUE))
+taxa_sp$sequence <- rownames(taxa_sp)
+taxa_sp <- left_join(taxa_sp, asv, by=c("sequence" = "sequence"))
+write.table(x = taxa_sp[,c(9:8, 1:7)], file = file.path(path_tax, "LSP48_LSP49_silva_species_assignment_v138.txt"), quote = F, col.names = T, row.names = T,  sep = "\t")
+
+```
+
+
+# Visualize 16S phylogeny using ggtree
+
+```{r eval=FALSE, message = FALSE, warning = FALSE}
+### plot tree using R package ggtree
+
+library(plyr)
+library(dplyr)
+library(phytools)
+
+library(ggtree)
+library(ggplot2)
+
+
+# define files to read
+path_tree = paste(HOME_LOCAL, "FastTree/", sep = "")
+path_tax = paste(HOME_LOCAL, "Taxonomy_16S/", sep = "")
+
+setwd(path_tree)
+
+# read in tree, taxonomy, fasta
+tree <- read.newick(paste(path_tree, dir(path_tree, pattern = "LSP48") , sep = "")) 
+tax <- read.table(paste(path_tax, dir(path_tax, pattern = "silva_species") , sep = ""), sep = "\t", stringsAsFactors = F, header = T) 
+
+# basic plot 
+p <- ggtree(tree, layout = 'circular')
+
+# add phylum
+p2 <- p %<+% tax + 
+        geom_tippoint(aes(color = Phylum), size = 1) +
+        theme(legend.position ="bottom")
+
+ggsave(filename = paste(path_tree, "LSP48_LSP49_1_phylum_circ20.pdf", sep = ""), width = 20, height = 20)
+ggsave(filename = paste(path_tree, "LSP48_LSP49_1_phylum_circ10.pdf", sep = ""), width = 10, height = 10)
+
+# add class
+p3 <- p %<+% tax + 
+        geom_tippoint(aes(color = Class), size = 1) +
+        theme(legend.position ="bottom")
+
+ggsave(filename = paste(path_tree, "LSP48_LSP49_2_class_circ20.pdf", sep = ""), width = 20, height = 20)
+ggsave(filename = paste(path_tree, "LSP48_LSP49_2_class_circ10.pdf", sep = ""), width = 10, height = 10)
+
+# add order
+p4 <- p %<+% tax + 
+        geom_tippoint(aes(color = Order), size = 1) +
+        theme(legend.position ="bottom")
+
+ggsave(filename = paste(path_tree, "LSP48_LSP49_3_order_circ20.pdf", sep = ""), width = 20, height = 20)
+ggsave(filename = paste(path_tree, "LSP48_LSP49_3_order_circ10.pdf", sep = ""), width = 10, height = 10)
+
+# add family
+p4 <- p %<+% tax + 
+        geom_tippoint(aes(color = Family), size = 1) +
+        theme(legend.position ="bottom")
+
+ggsave(filename = paste(path_tree, "LSP48_LSP49_4_family_circ20.pdf", sep = ""), width = 20, height = 20)
+ggsave(filename = paste(path_tree, "LSP48_LSP49_4_family_circ10.pdf", sep = ""), width = 10, height = 10)
+
+# add genus
+p4 <- p %<+% tax + 
+        geom_tippoint(aes(color = Genus), size = 1) +
+        theme(legend.position ="bottom")
+
+ggsave(filename = paste(path_tree, "LSP48_LSP49_5_genus_circ20.pdf", sep = ""), width = 20, height = 20)
+ggsave(filename = paste(path_tree, "LSP48_LSP49_5_genus_circ10.pdf", sep = ""), width = 10, height = 10)
+
+
+```
+

@@ -1,0 +1,269 @@
+---
+title: "Primer design and diversity based selection"
+output: html_notebook
+---
+
+# Overview
+
+This script details the steps for taxon-specific primer design based on pangenome core loci:
+
+1. Create a multifasta file for each core loci.
+
+2. Align multifasta core files.
+
+3. Based on the multifasta core alignment, create consensus sequences. Here, paramters may have to be adjusted depending on the used genomes.
+
+4. Primer prediction on the consesus sequences.
+
+5. Nucleotide diversity calcualtions of the in silico amplicons to prioritize primer pairs to be used.
+
+
+
+
+
+# Create a multifasta file for each core loci
+
+Input file: Core_loci_seq.fasta, multifasta file of core loci sequences as defined by core loci threshold.
+
+Output files: Individual multifasta file for each core loci.
+
+```{bash eval=FALSE}
+
+awk '/Locus/{close(x);x="F"++i;next}{print > x;}' Core_loci_seq.fasta
+
+for f in $( find . -name "F*") ; do 
+  mv "$f" "$f.fa"
+done
+```
+
+
+
+# Run Muscle alignment for each core multifasta
+
+Input files: Individual multifasta file for each core loci.
+
+Output files: Aligned multifasta file for each core loci.
+
+```{bash eval=FALSE}
+
+fasta=( $( find . -name "F*.fa") )
+
+for fa in ${fasta[@]}
+do
+
+fa_out=$( echo $fa | sed 's/.fa/_ali.fa/' )
+echo $fa
+echo $fa_out
+
+muscle -in $fa -out $fa_out
+
+done
+```
+
+
+
+# Create consensus sequences for each core loci
+
+Input files: Aligned multifasta file for each core loci.
+
+Output files: Consesus.fasta files for each core loci.
+
+Note: Adjustment of identity threshold may be needed. For Pseudomonas, a identity of 10/20 was required, as Primer3 fails if there are too many Ns.
+
+```{bash eval=FALSE}
+#### Run Emboss cons
+
+fasta=( $( find . -name "F*_ali.fa") )
+
+for fa in ${fasta[@]}
+do
+
+fa_name=$( echo $fa | sed 's/_ali.fa/_cons/' | sed 's/.*F/F/' )
+fa_out=$( echo $fa | sed 's/_ali.fa/_cons.fa/' )
+echo $fa
+echo $fa_out
+
+cons \
+-sequence $fa \
+-outseq $fa_out \
+-plurality 0.8 \
+-identity 10 \
+-name $fa_name
+
+done
+
+```
+
+
+
+# Predict primer sequences on consensus sequence with Primer3
+
+Input files: Consesus.fasta files for each core loci, primer3 setting file containing parameter options for primer3.
+
+Output files: Primer settings file for each consensus core loci that is used for primer3. Primer3 output text files containing predicted primer sequences for each consensus core loci.
+
+
+
+```{bash eval=FALSE}
+#### Create Primer3 input files
+
+# create input setting file that contains the input sequence on one line and then all parameters
+fasta=( $( find . -name "F*_cons.fa") )
+
+for fa in ${fasta[@]}
+do
+
+out_name=$( echo $fa | sed 's/_cons.fa/_primer3_settings.txt/' )
+echo $fa
+echo $out_name
+
+# reformat fasta sequence file to input in primer3, save in primer3 settings file
+sed '2s/^/SEQUENCE_TEMPLATE=/' $fa | sed 's/>/SEQUENCE_ID=/' \
+| tr -d '\n' | sed -e $'s/cons/cons\\\n/g' \
+> $out_name
+# add primer 3 options to settings file
+sed -i -e '$a\' $out_name
+cat 02_primer3_settings.txt >> $out_name
+
+done
+
+#### Run Primer3
+
+settings=( $( find . -name "F*_primer3_settings.txt") )
+
+for se in ${settings[@]}
+do
+
+out_name=$( echo $se | sed 's/_primer3_settings.txt/_primer3_output.txt/' )
+echo $se
+echo $out_name
+
+primer3_core $se > $out_name
+
+done
+
+```
+
+
+
+# Calculate nucleotide diversity per site of the in silico amplicons
+
+
+Input files: Primer3 output text files containing predicted primer sequences for each consensus core loci as well as aligned multifasta per core loci.
+
+Output files: Nucleotide diversity calculations per site of each amplicon.
+
+
+```{bash eval=FALSE, message = FALSE, warning = FALSE}
+### Make bed file with primer amplicon coordinates
+
+primer=( $( find . -name "F*_primer3_output.txt") ) # Input: primer3 output
+
+for pr in ${primer[@]}
+do
+
+out_name=$( echo $pr | sed 's/_primer3_output.txt/_amplicon.bed/' | sed 's/..//')
+echo $pr
+echo $out_name
+
+grep '^PRIMER........\?=' $pr > $out_name # select coordinate lines
+sed -i '' -e 's/.*=//g' $out_name # remove start descripter
+sed -i '' -e 's/,..//g' $out_name
+sed -i '' -e ':a' -e 'N' -e '$!ba' -e 's/\n/ /g' $out_name # remove newlines
+sed -i '' -e $'s/[[:blank:]]/\\\n/2;P;D' $out_name # make 2 column bed file
+sed -i '' -e $'s/[[:blank:]]/,/g' $out_name
+
+done
+
+
+### Cutout amplicon from aligned multifasta core files
+
+fasta=( $( find . -name "F*_ali.fa") ) # Input: aligned multifasta core loci
+
+for fa in ${fasta[@]}
+do
+
+bed=$( echo $fa | sed 's/_ali.fa/_amplicon.bed/' | sed 's/..//')
+echo $fa
+echo $bed
+
+  while read l; do
+  
+  out=$( echo "${fa} ${l}.fa" | sed 's/ali.fa /amplicon_MSA_/' | sed 's/,/_/' |  sed 's/..//')
+  echo $out
+  
+  extractalign -sequence $fa -regions $l -outseq $out
+  
+  done < $bed
+
+done
+
+
+### For each amplicon, calculate nucleotide diversity
+
+
+file=( $( find . -name "F*amplicon_MSA_*.fa") ) # Input: aligned multifasta amplicons
+
+for fil in ${file[@]}
+
+do
+
+vcf=$( echo $fil | sed 's/.fa/.vcf/')
+pi=$( echo $fil | sed 's/.fa/_nucdiv/')
+echo $fil
+
+# create vcf file from multi-fasta using snp-sites
+snp-sites -v -o $vcf $fil
+
+# calcualte nucleotide diversity for each base using vcftools
+vcftools --vcf $vcf --out $pi --site-pi --haploid
+# nucleotide diversity calculated as as fraction of pairwise comparisons that differ in their nucleotides, ranges from 0 to 1
+
+done
+
+
+```
+
+
+# For each amplicon, calculate overall diversity to choose top hit candidate amplicon
+
+Input files: Nucleotide diversity calculations per site of each amplicon.
+
+Output files: Nucleotide diversity calculations per amplicon.
+
+```{r eval=FALSE, message = FALSE, warning = FALSE}
+
+rm(list = ls())
+
+library(plyr)
+library(dplyr)
+library(purrr)
+library(tidyr)
+
+### read in all nucdiv files
+files <- dir(path = path, 
+             pattern = "*_nucdiv.sites.pi") # get file names
+
+nucdiv <- tibble(filename = files) %>% 
+                  mutate(file_contents = map(filename,          
+                  ~ read.table(file.path(path, .), header = T, stringsAsFactors = F, sep = "\t" )) )  
+nucdiv <- unnest(nucdiv, cols = c(file_contents))
+
+
+### calculate diversity per amplicon
+
+# vcftools sites-pi  gives PI - the diversity of each polymorphic site
+# so the sum of PI is the total diversity of the amplicon
+nucdiv_sum <- nucdiv %>% group_by(filename) %>% summarize(Sum_PI = sum(PI, na.rm=TRUE))
+
+# if you divide the sum by the length, you see whether these diversity is compact or not
+
+temp <- data.frame(do.call('rbind', strsplit(as.character(nucdiv_sum$filename),'_',fixed=TRUE)))[,4:5]
+temp <- temp %>% mutate_all(as.character) %>% mutate_all(as.numeric)
+nucdiv_sum$length <- temp$X5 - temp$X4
+nucdiv_sum$PI_per_length <- nucdiv_sum$Sum_PI/nucdiv_sum$length
+
+nucdiv_sum <- nucdiv_sum[order(-nucdiv_sum$Sum_PI),]
+write.table(nucdiv_sum, file = "Nucdiv_sum_per_amplicon.txt", col.names = T, row.names = F, quote = F, sep = "\t")
+
+```

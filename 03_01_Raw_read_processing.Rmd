@@ -1,0 +1,401 @@
+---
+title: "Amplicon raw read processing"
+output: html_notebook
+---
+
+# Overview
+
+PacBio sequencing was performed on a Sequel II machine with the SMRT 8M cell. 
+
+Two sequencing runs were conducted: the first one using SMRT Link version 10.1 for all leaf samples, and the second using SMRT Link version 11.1 for all mock samples. 
+
+Sequencing data generated for this work are available at the NCBI Sequence Read Archive (SRA) BioProject PRJNA1102740.
+
+Raw read processing was performed on the two runs individually. 
+For the codes below, the run 1 is indicated, the same script was used for run 2.
+
+
+# Create consensus from CCS
+
+The sequencing company FGCZ already ran CCS during sequencing and delivers only output.bam, not subreads.
+For run 1, p3357_o24760_3_2_C01.fullCell.tar.gz, ccs version 6.0.0 was used.
+For run 2, p3357_o30086_3_4_B01.fullCell.tar.gz, ccs version 6.3.0 was used.
+
+Note: ccs version >=6.3.0 stores additional tags per records, indicating if the molecule has missing adapters on either side. 
+This will influence the lima perofrmance below.
+
+
+# Split by barcode
+
+Splitting is done by lima. 
+To choose parameter options, the following parameter settings were compared beforehand:
+
+--per-read --peek-guess --min-passes 0 --split-bam-named --ccs --different # peek guess per read
+--per-read --min-passes 0 --split-bam-named --ccs --different # wo peak guess
+--per-read --min-passes 0 --split-bam-named --ccs --different -A 1 -B 3 -D 2 -I 2 -X 0 # wo peak guess, reduce penalties by 1
+--per-read --min-passes 0 --split-bam-named --ccs --different -A 1 -B 2 -D 1 -I 1 -X 0 # wo peak guess, reduce penalties by 2
+--per-read --min-passes 0 --split-bam-named --ccs --different -A 2 -B 2 -D 1 -I 1 -X 0 # wo peak guess, reduce penalties by 3
+--per-read --min-passes 0 --split-bam-named --ccs --different -A 3 -B 2 -D 1 -I 1 -X 0 # wo peak guess, reduce penalties by 4
+--hifi-preset ASYMMETRIC
+
+Pass and Fail counts were compared and settings with highest pass and lowest fail settings were chosen.
+
+
+```{bash eval=FALSE, message = FALSE, warning = FALSE}
+### install lima
+# lima 2.7.1
+conda activate /home/luzia/conda-env
+conda install -c bioconda lima 
+
+
+### split ccs.bam by barcodes using lima
+cd $HOME/lima
+sbatch -n 24 -p normal.168h --wrap="/home/luzia/conda-env/bin/lima --log-level INFO --per-read --min-passes 0 --split-bam-named --ccs --different -A 1 -B 3 -D 2 -I 2 -X 0 $HOME/2_C01/m64141e_210513_212412.reads.bam $HOME/03_01_Barcodes.fasta m64141e_210513_212412.reads.split.bam"
+
+
+### bam to fastq
+cd $HOME/lima
+for i in m64141e_210513_212412.reads.split.*.bam; do
+    
+    fastq=$( echo $i | sed 's/.bam/.fastq/')
+    fasta=$( echo $i | sed 's/.bam/.fasta/')
+    echo $i
+    echo $fastq
+    
+    bedtools bamtofastq -i $i -fq $fastq
+    gzip $fastq
+    samtools fasta $i > $fasta
+    
+done
+
+### copy results
+cd $HOME/lima
+mv *.fasta $HOME/Amplicon_fasta
+mv *.fastq.gz $HOME/Amplicon_fastq
+```
+
+### Visualize output statistics
+
+Lima offers R scripts for quality control:
+report_detail.R and counts_detail.R are for low-plex data
+report_summary.R for high-plex (>384 barcodes) data
+
+```{bash eval=FALSE, message = FALSE, warning = FALSE}
+cd $HOME/lima
+Rscript --vanilla report_summary.sh m64141e_210513_212412.reads.split.lima.report
+```
+
+
+# Split barcoded reads to different amplicons
+
+Each barcode file contains reads from 6 different amplicons.
+Per barcode fasta file, blast reads to reference sequence of each amplicon, report identity to reference sequence.
+Allocate read to top identity amplicon.
+
+### Blast reads to reference amplicon sequence
+
+sbatch -p normal.168h -c 4 -o Run1_blast Run1_blast_sub.sh 
+
+```{bash eval=FALSE, message = FALSE, warning = FALSE}
+
+cd $HOME
+
+for i in Amplicon_fasta/m64141e_210513_212412.reads.split.*.fasta; do
+
+    out=$( echo $i | sed 's/Amplicon_fasta/Amplicon_blast/' | sed 's/\.fasta//' )
+    echo $out
+
+    blastn  -query $i -subject 03_01_Reference_amplicons.fasta -outfmt 6 > $out.blast.txt
+
+done
+```
+
+
+### Select top hits
+
+sbatch -p normal.168h -c 1 -o Run1_blast_split_R Run1_blast_split_R.sh 
+
+```{r eval=FALSE}
+library(plyr)
+library(dplyr)
+
+### For each sample blast file, seleect top blast hit for each read
+
+### read blast sample files
+myfiles = list.files(path=paste(HOME,"Amplicon_blast", sep = ""), full.names=TRUE)
+
+for( i in 1:length(myfiles)){
+  
+dat = ldply(myfiles[i], read.table, sep = "\t", fill=TRUE, header = FALSE, stringsAsFactors = FALSE,
+                col.names = c("qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", 
+                              "qstart", "qend", "sstart", "send", "evalue", "bitscore"))
+dat <- dat[complete.cases(dat),]
+
+# summarize by eval, then length, then identity
+dat_sum <- dat %>% group_by(qseqid) %>% top_n(n=1,wt=-evalue)
+dat_sum <- dat_sum %>% group_by(qseqid) %>% top_n(n=1,wt=length)
+dat_sum <- dat_sum %>% group_by(qseqid) %>% top_n(n=1,wt=pident)
+
+# save
+out_name <- gsub(x = myfiles[i], pattern = "blast.txt", replacement = "blast_sum_all.txt")
+out_name <- gsub(x = out_name, pattern = "Amplicon_blast", replacement = "Amplicon_blast_split")
+write.table(dat_sum, file = out_name, quote = FALSE, sep = "\t", col.names = FALSE, row.names = FALSE)
+
+# save subset per amplicon
+write.table(dat_sum[dat_sum$sseqid=="LSP48_LSP49","qseqid"], 
+            file = gsub(x = out_name, pattern = "blast_sum_all.txt", replacement = "blast_sum_LSP48_LSP49.txt"), 
+            quote = FALSE, sep = "\t", col.names = FALSE, row.names = FALSE)
+write.table(dat_sum[dat_sum$sseqid=="LSP36_LSP46","qseqid"], 
+            file = gsub(x = out_name, pattern = "blast_sum_all.txt", replacement = "blast_sum_LSP36_LSP46.txt"), 
+            quote = FALSE, sep = "\t", col.names = FALSE, row.names = FALSE)
+write.table(dat_sum[dat_sum$sseqid=="LSP31_LSP41","qseqid"], 
+            file = gsub(x = out_name, pattern = "blast_sum_all.txt", replacement = "blast_sum_LSP31_LSP41.txt"), 
+            quote = FALSE, sep = "\t", col.names = FALSE, row.names = FALSE)
+
+write.table(dat_sum[dat_sum$sseqid=="LSP08_LSP10","qseqid"], 
+            file = gsub(x = out_name, pattern = "blast_sum_all.txt", replacement = "blast_sum_LSP08_LSP10.txt"), 
+            quote = FALSE, sep = "\t", col.names = FALSE, row.names = FALSE)
+write.table(dat_sum[dat_sum$sseqid=="LSP15_LSP16","qseqid"], 
+            file = gsub(x = out_name, pattern = "blast_sum_all.txt", replacement = "blast_sum_LSP15_LSP16.txt"), 
+            quote = FALSE, sep = "\t", col.names = FALSE, row.names = FALSE)
+write.table(dat_sum[dat_sum$sseqid=="LSP23_LSP24","qseqid"], 
+            file = gsub(x = out_name, pattern = "blast_sum_all.txt", replacement = "blast_sum_LSP23_LSP24.txt"), 
+            quote = FALSE, sep = "\t", col.names = FALSE, row.names = FALSE)
+
+}
+
+```
+
+
+### Allocate reads to top identity amplicon 
+
+sbatch -p normal.168h -c 1 -o Run1_fasomeRecords Run1_fasomeRecords.sh 
+
+```{bash eval=FALSE, message = FALSE, warning = FALSE}
+
+mkdir Amplicon_fastq_split
+
+cd $HOME
+
+while read l; do
+
+prefix=$( echo $l | sed 's/.fasta//')
+echo $prefix
+
+# want to split fastq not fasta, as dada2 works with quality profiles later
+
+# faSomeRecords works only with fasta not fastq, hence simply change fastq to fake fasta for recognition, i.e. @ to >
+# Attention: fastq quality scores for PacBio can start with @ or > 
+# Thus, need to change quality score lines starting with >, then change fastq headers
+
+
+# LSP36_LSP46
+gzip -kd Amplicon_fastq/$prefix.fastq.gz 
+# change starting > qual score to non-used "ä"
+sed 's/^>/ä/g' Amplicon_fastq/$prefix.fastq > Amplicon_fastq/$prefix.tmp1.fastq 
+# change header
+sed 's/^\@m64141e_210513_212412/\>m64141e_210513_212412/g' Amplicon_fastq/$prefix.tmp1.fastq > Amplicon_fastq/$prefix.tmp2.fastq 
+# subset reads
+python faSomeRecords.py --fasta Amplicon_fastq/$prefix.tmp2.fastq --list Amplicon_blast_split/$prefix.blast_sum_LSP36_LSP46.txt -o Amplicon_fastq_split/$prefix.LSP36_LSP46.tmp3.fastq 
+# change header back
+sed 's/^>m64141e_210513_212412/\@m64141e_210513_212412/g' Amplicon_fastq_split/$prefix.LSP36_LSP46.tmp3.fastq > Amplicon_fastq_split/$prefix.LSP36_LSP46.tmp4.fastq 
+# change "ä" back to > 
+sed 's/^ä/\>/g' Amplicon_fastq_split/$prefix.LSP36_LSP46.tmp4.fastq > Amplicon_fastq_split/$prefix.LSP36_LSP46.fastq 
+gzip -k Amplicon_fastq_split/$prefix.LSP36_LSP46.fastq
+
+# LSP31_LSP41
+gzip -kd Amplicon_fastq/$prefix.fastq.gz 
+# change starting > qual score to non-used "ä"
+sed 's/^>/ä/g' Amplicon_fastq/$prefix.fastq > Amplicon_fastq/$prefix.tmp1.fastq 
+# change header
+sed 's/^\@m64141e_210513_212412/\>m64141e_210513_212412/g' Amplicon_fastq/$prefix.tmp1.fastq > Amplicon_fastq/$prefix.tmp2.fastq 
+# subset reads
+python faSomeRecords.py --fasta Amplicon_fastq/$prefix.tmp2.fastq --list Amplicon_blast_split/$prefix.blast_sum_LSP31_LSP41.txt -o Amplicon_fastq_split/$prefix.LSP31_LSP41.tmp3.fastq 
+# change header back
+sed 's/^>m64141e_210513_212412/\@m64141e_210513_212412/g' Amplicon_fastq_split/$prefix.LSP31_LSP41.tmp3.fastq > Amplicon_fastq_split/$prefix.LSP31_LSP41.tmp4.fastq 
+# change "ä" back to > 
+sed 's/^ä/\>/g' Amplicon_fastq_split/$prefix.LSP31_LSP41.tmp4.fastq > Amplicon_fastq_split/$prefix.LSP31_LSP41.fastq 
+gzip -k Amplicon_fastq_split/$prefix.LSP31_LSP41.fastq
+
+# LSP48_LSP49
+gzip -kd Amplicon_fastq/$prefix.fastq.gz 
+# change starting > qual score to non-used "ä"
+sed 's/^>/ä/g' Amplicon_fastq/$prefix.fastq > Amplicon_fastq/$prefix.tmp1.fastq 
+# change header
+sed 's/^\@m64141e_210513_212412/\>m64141e_210513_212412/g' Amplicon_fastq/$prefix.tmp1.fastq > Amplicon_fastq/$prefix.tmp2.fastq 
+# subset reads
+python faSomeRecords.py --fasta Amplicon_fastq/$prefix.tmp2.fastq --list Amplicon_blast_split/$prefix.blast_sum_LSP48_LSP49.txt -o Amplicon_fastq_split/$prefix.LSP48_LSP49.tmp3.fastq 
+# change header back
+sed 's/^>m64141e_210513_212412/\@m64141e_210513_212412/g' Amplicon_fastq_split/$prefix.LSP48_LSP49.tmp3.fastq > Amplicon_fastq_split/$prefix.LSP48_LSP49.tmp4.fastq 
+# change "ä" back to > 
+sed 's/^ä/\>/g' Amplicon_fastq_split/$prefix.LSP48_LSP49.tmp4.fastq > Amplicon_fastq_split/$prefix.LSP48_LSP49.fastq 
+gzip -k Amplicon_fastq_split/$prefix.LSP48_LSP49.fastq
+
+
+# LSP08_LSP10
+gzip -kd Amplicon_fastq/$prefix.fastq.gz 
+# change starting > qual score to non-used "ä"
+sed 's/^>/ä/g' Amplicon_fastq/$prefix.fastq > Amplicon_fastq/$prefix.tmp1.fastq 
+# change header
+sed 's/^\@m64141e_210513_212412/\>m64141e_210513_212412/g' Amplicon_fastq/$prefix.tmp1.fastq > Amplicon_fastq/$prefix.tmp2.fastq 
+# subset reads
+python faSomeRecords.py --fasta Amplicon_fastq/$prefix.tmp2.fastq --list Amplicon_blast_split/$prefix.blast_sum_LSP08_LSP10.txt -o Amplicon_fastq_split/$prefix.LSP08_LSP10.tmp3.fastq 
+# change header back
+sed 's/^>m64141e_210513_212412/\@m64141e_210513_212412/g' Amplicon_fastq_split/$prefix.LSP08_LSP10.tmp3.fastq > Amplicon_fastq_split/$prefix.LSP08_LSP10.tmp4.fastq 
+# change "ä" back to > 
+sed 's/^ä/\>/g' Amplicon_fastq_split/$prefix.LSP08_LSP10.tmp4.fastq > Amplicon_fastq_split/$prefix.LSP08_LSP10.fastq 
+gzip -k Amplicon_fastq_split/$prefix.LSP08_LSP10.fastq
+
+# LSP15_LSP16
+gzip -kd Amplicon_fastq/$prefix.fastq.gz 
+# change starting > qual score to non-used "ä"
+sed 's/^>/ä/g' Amplicon_fastq/$prefix.fastq > Amplicon_fastq/$prefix.tmp1.fastq 
+# change header
+sed 's/^\@m64141e_210513_212412/\>m64141e_210513_212412/g' Amplicon_fastq/$prefix.tmp1.fastq > Amplicon_fastq/$prefix.tmp2.fastq 
+# subset reads
+python faSomeRecords.py --fasta Amplicon_fastq/$prefix.tmp2.fastq --list Amplicon_blast_split/$prefix.blast_sum_LSP15_LSP16.txt -o Amplicon_fastq_split/$prefix.LSP15_LSP16.tmp3.fastq 
+# change header back
+sed 's/^>m64141e_210513_212412/\@m64141e_210513_212412/g' Amplicon_fastq_split/$prefix.LSP15_LSP16.tmp3.fastq > Amplicon_fastq_split/$prefix.LSP15_LSP16.tmp4.fastq 
+# change "ä" back to > 
+sed 's/^ä/\>/g' Amplicon_fastq_split/$prefix.LSP15_LSP16.tmp4.fastq > Amplicon_fastq_split/$prefix.LSP15_LSP16.fastq 
+gzip -k Amplicon_fastq_split/$prefix.LSP15_LSP16.fastq
+
+# LSP23_LSP24
+gzip -kd Amplicon_fastq/$prefix.fastq.gz 
+# change starting > qual score to non-used "ä"
+sed 's/^>/ä/g' Amplicon_fastq/$prefix.fastq > Amplicon_fastq/$prefix.tmp1.fastq 
+# change header
+sed 's/^\@m64141e_210513_212412/\>m64141e_210513_212412/g' Amplicon_fastq/$prefix.tmp1.fastq > Amplicon_fastq/$prefix.tmp2.fastq 
+# subset reads
+python faSomeRecords.py --fasta Amplicon_fastq/$prefix.tmp2.fastq --list Amplicon_blast_split/$prefix.blast_sum_LSP23_LSP24.txt -o Amplicon_fastq_split/$prefix.LSP23_LSP24.tmp3.fastq 
+# change header back
+sed 's/^>m64141e_210513_212412/\@m64141e_210513_212412/g' Amplicon_fastq_split/$prefix.LSP23_LSP24.tmp3.fastq > Amplicon_fastq_split/$prefix.LSP23_LSP24.tmp4.fastq 
+# change "ä" back to > 
+sed 's/^ä/\>/g' Amplicon_fastq_split/$prefix.LSP23_LSP24.tmp4.fastq > Amplicon_fastq_split/$prefix.LSP23_LSP24.fastq 
+gzip -k Amplicon_fastq_split/$prefix.LSP23_LSP24.fastq
+
+done < 03_01_Barcode_combinations_names_run1.txt
+
+rm Amplicon_fastq/*.tmp1.fastq
+rm Amplicon_fastq/*.tmp2.fastq
+rm Amplicon_fastq_split/*.tmp3.fastq
+rm Amplicon_fastq_split/*.tmp4.fastq
+
+```
+
+
+# Remove primer using cutadapt
+
+sbatch -p normal.168h -c 1 -o Run1_cutadapt Run1_cutadapt.sh 
+
+```{bash eval=FALSE, message = FALSE, warning = FALSE}
+
+### Install cutadapt using pip3
+python3 -m pip install --user --upgrade cutadapt
+
+
+mkdir Amplicon_fastq_split_wo_primer
+
+cd $HOME
+
+# cutadapt options
+# Linked primers with ... required at both ends
+# Reads that don't have primer at both ends are discarded
+# Primer and reads are searched also in reverse complement
+
+
+### LSP08_LSP10
+
+for i in Amplicon_fastq_split/m64141e_210513_212412.reads.split.*LSP08_LSP10.fastq; do
+
+    out=$( echo $i | sed 's/Amplicon_fastq_split/Amplicon_fastq_split_wo_primer/')
+    echo $i
+
+    cutadapt -a CTTGGTCATTTAGAGGAAGTAA...CGAAGTTTCCCTCAGGA --discard-untrimmed --revcomp -o $out $i
+  
+done
+
+
+### LSP48_LSP49
+
+for i in Amplicon_fastq_split/m64141e_210513_212412.reads.split.*LSP48_LSP49.fastq; do
+
+    out=$( echo $i | sed 's/Amplicon_fastq_split/Amplicon_fastq_split_wo_primer/')
+    echo $i
+
+    cutadapt -a AGRGTTYGATYMTGGCTCAG...AAGTCGTAACAAGGTARCY --discard-untrimmed --revcomp -o $out $i
+
+done
+
+
+### LSP15_LSP16
+
+for i in Amplicon_fastq_split/m64141e_210513_212412.reads.split.*LSP15_LSP16.fastq; do
+
+    out=$( echo $i | sed 's/Amplicon_fastq_split/Amplicon_fastq_split_wo_primer/')
+    echo $i
+
+    cutadapt -a AGGACAAGCAACATCGAGYA...GCYGATGACCCGAGTGAACA --discard-untrimmed --revcomp -o $out $i
+
+done
+
+
+### LSP23_LSP24
+
+for i in Amplicon_fastq_split/m64141e_210513_212412.reads.split.*LSP23_LSP24.fastq; do
+
+    out=$( echo $i | sed 's/Amplicon_fastq_split/Amplicon_fastq_split_wo_primer/')
+    echo $i
+
+    cutadapt -a ACCACTTCGTCCACATCGTC...TTCTGCTTGCTTGYCGKTTC --discard-untrimmed --revcomp -o $out $i
+
+done
+
+
+### LSP31_LSP41
+
+for i in Amplicon_fastq_split/m64141e_210513_212412.reads.split.*LSP31_LSP41.fastq; do
+
+    out=$( echo $i | sed 's/Amplicon_fastq_split/Amplicon_fastq_split_wo_primer/')
+    echo $i
+
+    cutadapt -a CCAGGCCRGCACTYAAAAAC...TTCATGRTYTTYCARCCCGG --discard-untrimmed --revcomp -o $out $i
+
+done
+
+
+### LSP36_LSP46
+
+for i in Amplicon_fastq_split/m64141e_210513_212412.reads.split.*LSP36_LSP46.fastq; do
+
+    out=$( echo $i | sed 's/Amplicon_fastq_split/Amplicon_fastq_split_wo_primer/')
+    echo $i
+
+    cutadapt -a TCATGGAYCAYGACAACCTG...AAGGAMATCAAYCGYCGCAT --discard-untrimmed --revcomp -o $out $i
+
+done
+
+```
+
+# Filter Mock and Leave samples of both runs
+
+```{bash eval=FALSE}
+
+cd $HOME
+
+# Leave run1
+mkdir $HOME/Amplicon_fastq_split_wo_primer_Leave_samples_run1
+for file in $(<File_list_PacBio_run1_Leave_samples.txt); do cp "$file" ./Amplicon_fastq_split_wo_primer_Leave_samples_run1/; done
+
+```
+
+```{bash eval=FALSE}
+
+cd $HOME
+
+# Mock run2
+mkdir $HOME/Amplicon_fastq_split_wo_primer_Mock_samples_run2
+for file in $(<File_list_PacBio_run2_Mock_samples.txt); do cp "$file" ./Amplicon_fastq_split_wo_primer_Mock_samples_run2/; done
+
+```
+

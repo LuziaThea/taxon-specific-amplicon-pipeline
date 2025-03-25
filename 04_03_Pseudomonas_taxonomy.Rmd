@@ -1,0 +1,133 @@
+---
+title: "Pseudomonas taxonomy"
+output: html_notebook
+---
+
+# Approach
+
+- Download all full Pseudomonas genomes of the Pseudomonas db
+- Blast all ASVs against all full known Pseudomonas genomes
+
+Rationale: you could also first blast the reference amplicon seq only, cut out the top hits, and then blast all ASVs against the "pre-cut" parts, however, there is a risk, that the length variation will bias the hits.
+
+
+
+# Pseudomonas db reference genomes 
+
+Download fasta files from all PS strains here:
+https://www.pseudomonas.com/strain/download
+Download "All complete genomes", i.e. 1073 genomes
+Date of download: 19.02.2023
+
+
+# Make Pseudomonas db blast_db
+
+```{bash eval=FALSE}
+
+### Make multifasta of all strains
+cd $HOME_LOCAL/Pseudomonas_db/fna
+cat *.fna >> Pseudomonas_all.fna
+
+### remove plasmid sequences (need to do that)
+seqkit grep -v -r -n -p '.*plasmid*' Pseudomonas_all.fna > Pseudomonas_all_wo_plasmids.fna
+
+### Change header to Assembly number GFC
+sed 's/refseq.*assembly=//g' Pseudomonas_all_wo_plasmids.fna > Pseudomonas_all_wo_plasmids_headers.fna
+
+### Change manually 2 sequences with several chromosomes to have unique headers
+
+GCF_008693965.1 to GCF_008693965.1_chr1 and GCF_008693965.1_chr2
+GCF_002097715.1 to GCF_002097715.1_chr1 and GCF_002097715.1_chr2 and GCF_002097715.1_chr3
+
+### Index
+samtools faidx Pseudomonas_all_wo_plasmids_headers.fna
+
+### Make blast_db
+makeblastdb -in Pseudomonas_all_wo_plasmids_headers.fna -parse_seqids -dbtype nucl
+
+```
+
+
+# Blast
+
+```{bash eval=FALSE}
+
+for i in LSP*asv.fa; do
+
+    prefix=$( echo $i | sed 's/\.fa//')
+    echo $prefix
+    
+    blastn -query $HOME_LOCAL/Dataset1_dada2_workflow/$i \
+       -db $HOME_LOCAL/Pseudomonas_db/Pseudomonas_all_wo_plasmids_headers.fna \
+       -out $HOME_LOCAL/Pseudomonas_blast/$prefix.blast.txt -outfmt '6 std sseq'
+       
+done    
+```
+
+
+# Pseudomonas subgroup annotation
+
+A strain& species annotation is available from the Pseudomonas db itself.
+
+The link to the subgroup is based on 
+Lalucat, J.; Mulet, M.; Gomila, M.; García-Valdés, E. Genomics in Bacterial Taxonomy: Impact on the Genus Pseudomonas. Genes 2020, 11, 139. https://doi.org/10.3390/genes11020139 
+
+
+# Blast result summary
+
+```{r eval=FALSE}
+library(dplyr)
+
+# Read in group and subgroup annotation
+setwd(paste(HOME_LOCAL,"Pseudomonas_db", sep = "/"))
+annot_subgroup <- read.table("Pseudomonas_db_strain_meta_data_subgroup.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+annot_strain <- read.table("Pseudomonas_db_strain_meta_data.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+
+# Loop through Pseudomonas amplicons
+for(i in c("LSP36_LSP46", "LSP31_LSP41", "LSP48_LSP49")){
+  
+# Read in blast results
+setwd(paste(HOME_LOCAL,"Pseudomonas_blast", sep = "/"))
+blast <- read.table(paste(i, "_asv.blast.txt", sep = "") , header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+names(blast) <- c("qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "seq")
+
+# Change annot for sseqid with several chr for later species matching
+blast[blast$sseqid %in% c("GCF_002097715.1_chr1", "GCF_002097715.1_chr2", "GCF_002097715.1_chr3"), "sseqid"] <- "GCF_002097715.1"
+blast[blast$sseqid %in% c("GCF_008693965.1_chr1", "GCF_008693965.1_chr2"), "sseqid"] <- "GCF_008693965.1"
+
+
+# Keep only the best hit by bitscore
+blast.best <- blast %>% group_by(qseqid) %>% filter(bitscore == max(bitscore)) %>% arrange(qseqid, bitscore) %>% as.data.frame()
+
+# check hit length
+hist(blast.best$length, breaks = 100)
+
+# Add annotation
+annot <- left_join(annot_strain, annot_subgroup, by=c("Species" = "Species"))
+blast.best <- left_join(blast.best, annot, by=c("sseqid" = "Refseq.assembly.accession"))
+
+
+# Summary table 1: per asv, keep several asv columns for all bitscore top hit
+blast.best1 <- blast.best
+write.table(blast.best1, file = paste(i, "_blast_summary_1.txt", sep = ""), quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+# Summary table 2: per asv, keep only one asv column with one hit
+blast.best2 <- blast.best %>% group_by(qseqid) %>% slice(1)
+write.table(blast.best2, file = paste(i, "_blast_summary_2.txt", sep = ""), quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+# Summary table 3: per asv, keep only one asv column with all hits congat
+blast.best3 <- blast.best %>% group_by(qseqid) %>% mutate(sseqid = paste0(sseqid, collapse = "; "),
+                                                          pident = paste0(pident, collapse = "; "),
+                                                          length = paste0(length, collapse = "; "),
+                                                          evalue = paste0(evalue, collapse = "; "),
+                                                          bitscore = paste0(bitscore, collapse = "; "),
+                                                          Species = paste0(Species, collapse = "; "),
+                                                          Strain = paste0(Strain, collapse = "; "),
+                                                          Group = paste0(Group, collapse = "; "),
+                                                          Subgroup = paste0(Subgroup, collapse = "; ") ) %>% slice(1)
+write.table(blast.best3, file = paste(i, "_blast_summary_3.txt", sep = ""), quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+}
+```
+

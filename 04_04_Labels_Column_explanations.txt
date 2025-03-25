@@ -1,0 +1,17 @@
+# Column explanations of text file 04_04_Lables.txt.		
+#Column_name	Column_explanation	
+Plate_PCR_384	PCR plate number.	
+Well_Row_PCR	Row of PCR plate.	
+Well_Column_PCR	Column of PCR plate.	
+Timepoint	"Timpoint of field sampling where LSP008 indicates the sampling date 23.05.2019, LSP009 the date 06.06.2019, LSP011 the date 27.06.2019, LSP013 the date 15.07.2019 and LSP014 the date 22.07.2019. Mock indicates the Mock community."	
+Sample_type	"Sample type L refers to leave samples, NEG to negative controls (extraction controls or PCR controls), and POS2 to Mock samples. "	
+Mock_type	"Specifies the Mock sample type: EXT (negative extraction control), PCR (negative PCR control), RAT (two strain dilution series), SIN (single isolates), CON (dilution series in leaf background), DIV (equimolar strain mixtures from two up to ten strains)."	
+Mock_number	Specifies the number of the Mock sample.	
+Cultivar	"Specifies the wheat cultivar: ARO (Arobase), AUB (Aubusson), FOR (Forel), LOR (Lorenzo), NAR (CH Nara), SIM (Simano), TIT (Titlis), ZIN (Zinal)."	
+Plot	"Specifies the plot: P1 (Plot 1) and P2 (Plot2). Two biological replicates of the wheat panel were grown in two complete block designs separated by approximately 100m at the field phenotyping platform site of the Eschikon Field Station of the ETH Zurich, Switzerland (coordinates 47.449¡N, 8.682¡E). "	
+Plant_number	"From each cultivar plot, two plants were sampled (1 and 2)."	
+Canopy_height	"From each plant three leaves were collected: the bottom leaf touching the ground (first leaf, A), the lowest leaf not touching the ground (second leaf, B) and then the flag leaf (fourth leaf, C)."	
+Replicate	PCR reactions were preformed and analyzed in triplicates. 	
+Sample_replicate	Combined sample name.	
+Barcode_Nr_Fwd	Forward barcode number. Sequences are provided in Supplementary Table 11.	
+Barcode_Nr_Rev	Reverse barcode number. Sequences are provided in Supplementary Table 11.	

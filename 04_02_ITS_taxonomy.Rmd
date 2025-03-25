@@ -1,0 +1,272 @@
+---
+title: "ITS taxonomy"
+output: html_notebook
+---
+
+# Assign taxonomy to ITS using dada2 tax functions and UNITE db, truncate reads to ITS
+
+Reasoning for truncating reads for taxonomy:
+UNITE db has only ITS, SILVA only SSU and LSU. 
+The dada2 classifier doesn't work like blast and thus seems to perform worse when the reads are longer than the ITS.
+
+# Truncate reads
+
+## Blast against Zymo ITS ref to get truncate coordinates
+
+```{bash eval=FALSE, message = FALSE, warning = FALSE}
+
+# create fasta index
+cd $HOME/Blast_truncate_ITS
+samtools faidx 04_02_ZTS46_ITS1ITS2.fasta
+
+# create blast db
+makeblastdb -in 04_02_ZTS46_ITS1ITS2.fasta -dbtype nucl -out ZTS46_ITS1ITS2.db
+
+# blast on cluster
+cd $HOME/Blast_truncate_ITS
+
+for i in LSP08*.fa; do
+
+    prefix=$( echo $i | sed 's/\_asv.fa//')
+    echo $prefix
+    
+    samtools faidx $i
+    
+    blastn -query $i \
+       -db ZTS46_ITS1ITS2.db -task "blastn"\
+       -out $prefix.blast -outfmt "6 std sseq"
+
+done
+```
+
+
+## Get start and end coordinates of blast hits to truncate
+
+```{r eval=FALSE, message = FALSE, warning = FALSE}
+# summarize  blast hits by min start query, max end query
+
+library(dplyr)
+
+setwd(paste(HOME_LOCAL, "Taxonomy_ITS/", sep = ""))
+
+blast <- read.table("LSP08_LSP10.blast", sep = "\t", header = F, stringsAsFactors = F)
+colnames(blast) <- c("qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore", "sseq")
+
+blast_sum1 <- blast %>% group_by(qseqid) %>% top_n(n = 1, wt = -qstart)
+blast_sum1 <- blast_sum1[!duplicated(blast_sum1$qseqid),]
+blast_sum2 <- blast %>% group_by(qseqid) %>% top_n(n = 1, wt = qend)
+blast_sum2 <- blast_sum2[!duplicated(blast_sum2$qseqid),]
+
+# make bed
+bed <- tibble(blast_sum1$qseqid, blast_sum1$qstart, blast_sum2$qend)
+
+write.table(x = bed, file = "LSP08_LSP10.bed", quote = F, row.names = F, col.names = F, sep = "\t")
+```
+
+## Truncate using seqkit
+
+```{bash eval=FALSE, message = FALSE, warning = FALSE}
+
+cd $HOME_LOCAL/Taxonomy_ITS
+
+# subset by bed coordinates
+seqkit subseq --bed LSP08_LSP10.bed LSP08_LSP10_asv.fa > LSP08_LSP10_asv_sub_bed.fa
+
+# convert to one line fasta
+awk '/^>/ {printf("\n%s\n",$0);next; } { printf("%s",$0);}  END {printf("\n");}' < LSP08_LSP10_asv_sub_bed.fa > LSP08_LSP10_asv_sub_bed2.fa
+```
+
+# Dada2 Species assignment 
+
+```{r eval=FALSE, message = FALSE, warning = FALSE}
+
+library(plyr)
+library(dplyr)
+library(dada2)
+library(stringr)
+
+path <- paste(HOME, "Taxonomy_ITS", sep = "")
+path_tax <- paste(HOME, "Tax_db/sh_general_release_29.11.2022", sep = "")
+
+# read in sub fasta
+asv <- read.table(file = file.path(path, "LSP08_LSP10_asv_sub_bed2.fa")) 
+
+# format sub fasta
+asv_table <- data.frame(header_long =  asv[seq(1,nrow(asv) - 1, by = 2), 1], sequence =  asv[seq(2,nrow(asv), by = 2), 1])
+t <- data.frame(str_split_fixed(asv_table$header, pattern = "_", n = 2))[,1]
+asv_table <- data.frame(header = gsub(x = t, pattern = ">", replacement = ""), sequence =  asv_table$sequence)
+
+# format table to assign taxonomy with sequence and dummy abundance column
+asv_table_f <- data.frame(sequence =  asv_table$sequence, abundance = 1  )
+
+# assign taxonomy with BOOT
+taxa_boot <- assignTaxonomy(asv_table_f, file.path(path_tax,"sh_general_release_dynamic_29.11.2022.fasta"), 
+                            multithread = TRUE, minBoot = 50, outputBootstraps = TRUE)
+saveRDS(taxa_boot, paste(path, "/", "LSP08_LSP10_sub_bed_unite_species_assignment_dynamic_29.11.2022.BOOT.rds", sep = ""))
+
+# assign taxonomy without BOOT
+taxa_woboot <- assignTaxonomy(asv_table_f, file.path(path_tax,"sh_general_release_dynamic_29.11.2022.fasta"), 
+                        multithread = TRUE, minBoot = 50, outputBootstraps = FALSE)
+# add ASV name to save
+taxa_woboot <- cbind(ASV = asv_table$header, taxa_woboot)
+write.table(x = taxa_woboot, file = paste(path, "/", "LSP08_LSP10_sub_bed_unite_species_assignment_dynamic_29.11.2022.txt", sep = ""), 
+            quote = F, col.names = T, row.names = T,  sep = "\t")
+saveRDS(taxa_woboot, paste(path, "/", "LSP08_LSP10_sub_bed_unite_species_assignment_dynamic_29.11.2022.rds", sep = ""))
+
+```
+
+
+# Dada2 Species assignment WITH FULL SEQUENCE
+
+```{r eval=FALSE, message = FALSE, warning = FALSE}
+
+library(plyr)
+library(dplyr)
+library(dada2)
+library(stringr)
+
+path <- paste(HOME, "Taxonomy_ITS", sep = "")
+path_tax <- paste(HOME, "Tax_db/sh_general_release_29.11.2022", sep = "")
+
+# read in sub fasta
+asv <- read.table(file = file.path(path, "LSP08_LSP10_asv.fa")) 
+
+# format sub fasta
+asv_table <- data.frame(header_long =  asv[seq(1,nrow(asv) - 1, by = 2), 1], sequence =  asv[seq(2,nrow(asv), by = 2), 1])
+t <- data.frame(str_split_fixed(asv_table$header, pattern = "_", n = 2))[,1]
+asv_table <- data.frame(header = gsub(x = t, pattern = ">", replacement = ""), sequence =  asv_table$sequence)
+
+# format table to assign taxonomy with sequence and dummy abundance column
+asv_table_f <- data.frame(sequence =  asv_table$sequence, abundance = 1  )
+
+# assign taxonomy with BOOT
+taxa_boot <- assignTaxonomy(asv_table_f, file.path(path_tax,"sh_general_release_dynamic_29.11.2022.fasta"), 
+                            multithread = TRUE, minBoot = 50, outputBootstraps = TRUE)
+saveRDS(taxa_boot, paste(path, "/", "LSP08_LSP10_full_unite_species_assignment_dynamic_29.11.2022.BOOT.rds", sep = ""))
+
+# assign taxonomy without BOOT
+taxa_woboot <- assignTaxonomy(asv_table_f, file.path(path_tax,"sh_general_release_dynamic_29.11.2022.fasta"), 
+                        multithread = TRUE, minBoot = 50, outputBootstraps = FALSE)
+# add ASV name to save
+taxa_woboot <- cbind(ASV = asv_table$header, taxa_woboot)
+write.table(x = taxa_woboot, file = paste(path, "/", "LSP08_LSP10_full_unite_species_assignment_dynamic_29.11.2022.txt", sep = ""), 
+            quote = F, col.names = T, row.names = T,  sep = "\t")
+saveRDS(taxa_woboot, paste(path, "/", "LSP08_LSP10_full_unite_species_assignment_dynamic_29.11.2022.rds", sep = ""))
+```
+
+
+
+
+
+
+# Alignmnet and phylogeny of ITS ASV
+
+Computed in LS041_Alignment_ASV_Pasta.Rmd
+
+
+# Visualize ITS phylogeny using ggtree
+
+```{r eval=FALSE, message = FALSE, warning = FALSE}
+
+library(phytools)
+library(ggtree)
+
+# read tree
+setwd(paste(HOME_LOCAL,"FastTree", sep = "/"))
+tree <- read.newick("LSP08_LSP10.marker001.LSP08_LSP10_asv.fa.aln.FastTree.tree") # FastTree
+ 
+# read taxonomy annotation
+setwd(paste(HOME_LOCAL,"Taxonomy_ITS", sep = "/"))
+annot <- read.table("LSP08_LSP10_sub_bed_unite_species_assignment_dynamic_29.11.2022.txt", header = TRUE, stringsAsFactors = F, sep = "\t", row.names = NULL)
+annot <- annot[,-1]
+
+setwd(paste(HOME_LOCAL,"FastTree", sep = "/"))
+
+# plot tree, color by Phylum
+p <- ggtree(tree, layout = 'circular')
+p <- p %<+% annot + 
+      geom_tippoint(aes(color = Phylum), size = 3) 
+ggsave(filename = paste("LSP08_LSP10_Phylum_circ20.pdf", sep = "_"), width = 20, height = 20)
+ggsave(filename = paste("LSP08_LSP10_Phylum_circ10.pdf", sep = "_"), width = 10, height = 10)
+ 
+# plot tree, color by Class
+p <- ggtree(tree, layout = 'circular')
+p <- p %<+% annot + 
+      geom_tippoint(aes(color = Class), size = 3) 
+ggsave(filename = paste("LSP08_LSP10_Class_circ20.pdf", sep = "_"), width = 20, height = 20)
+ggsave(filename = paste("LSP08_LSP10_Class_circ10.pdf", sep = "_"), width = 10, height = 10)
+
+# plot tree, color by Order
+p <- ggtree(tree, layout = 'circular')
+p <- p %<+% annot + 
+      geom_tippoint(aes(color = Order), size = 3) 
+ggsave(filename = paste("LSP08_LSP10_Order_circ20.pdf", sep = "_"), width = 20, height = 20)
+ggsave(filename = paste("LSP08_LSP10_Order_circ10.pdf", sep = "_"), width = 10, height = 10)
+
+# plot tree, color by Family
+p <- ggtree(tree, layout = 'circular')
+p <- p %<+% annot + 
+      geom_tippoint(aes(color = Family), size = 3) 
+ggsave(filename = paste("LSP08_LSP10_Family_circ20.pdf", sep = "_"), width = 20, height = 20)
+ggsave(filename = paste("LSP08_LSP10_Family_circ10.pdf", sep = "_"), width = 10, height = 10)
+
+# plot tree, color by Genus
+p <- ggtree(tree, layout = 'circular')
+p <- p %<+% annot + 
+      geom_tippoint(aes(color = Genus), size = 3) 
+ggsave(filename = paste("LSP08_LSP10_Genus_circ20.pdf", sep = "_"), width = 20, height = 20)
+ggsave(filename = paste("LSP08_LSP10_Genus_circ10.pdf", sep = "_"), width = 10, height = 10)
+
+# plot tree, color by Species
+p <- ggtree(tree, layout = 'circular')
+p <- p %<+% annot + 
+      geom_tippoint(aes(color = Genus), size = 3) 
+ggsave(filename = paste("LSP08_LSP10_Species_circ20.pdf", sep = "_"), width = 20, height = 20)
+ggsave(filename = paste("LSP08_LSP10_Species_circ10.pdf", sep = "_"), width = 10, height = 10)
+
+```
+
+# Troubleshoot Rust
+
+Test whether truncation based on PS blast was not working for Rust.
+Blast full sequences of samples with Rust, do we we have a Rust hit?
+
+To get sequences of Rust samples, take phyloseq object
+
+### Subset ASV from sample
+
+```{bash eval=FALSE}
+cd /Users/luzia/Dropbox/1_PHD/Code/2023_01_25_PacBio_LS041_dataset_method/Abundance_ITS
+seqkit grep LSP08_LSP10_asv.fa LS011_L_FOR_P2_2C_tax_asv.txt > LS011_L_FOR_P2_2C_sub.fa
+
+seqkit grep -n -f LS011_L_FOR_P2_2C_tax_asv.txt LSP08_LSP10_asv.fa > LS011_L_FOR_P2_2C_sub.fa
+```
+
+# Look at bootstrap confidence
+
+```{r eval=FALSE}
+
+setwd(paste(HOME_LOCAL,"Taxonomy_ITS", sep = "/"))
+
+tax_sub <- readRDS("LSP08_LSP10_sub_bed_unite_species_assignment_dynamic_29.11.2022.rds")
+tax_sub2 <- read.table("LSP08_LSP10_sub_bed_unite_species_assignment_dynamic_29.11.2022.txt", header = TRUE, stringsAsFactors = F, sep = "\t", row.names = NULL)
+
+tax_sub_boot <- readRDS("LSP08_LSP10_sub_bed_unite_species_assignment_dynamic_29.11.2022.BOOT.rds")
+tax_sub_boot <- tax_sub_boot[["boot"]]
+tax_sub_boot <- cbind(tax_sub2, tax_sub_boot)
+
+zymo <- tax_sub_boot[tax_sub_boot$Genus == "g__Zymoseptoria",]
+zymo <- zymo[rowSums(is.na(zymo)) != ncol(zymo),]
+
+# full seq
+
+tax_all <- readRDS("LSP08_LSP10_full_unite_species_assignment_dynamic_29.11.2022.rds")
+tax_all2 <- read.table("LSP08_LSP10_full_unite_species_assignment_dynamic_29.11.2022.txt", header = TRUE, stringsAsFactors = F, sep = "\t", row.names = NULL)
+
+tax_all_boot <- readRDS("LSP08_LSP10_full_unite_species_assignment_dynamic_29.11.2022.BOOT.rds")
+tax_all_boot <- tax_all_boot[["boot"]]
+tax_all_boot <- cbind(tax_all2, tax_all_boot)
+
+```
+
+

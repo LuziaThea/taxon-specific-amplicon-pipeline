@@ -1,0 +1,105 @@
+---
+title: "Pangenome creation"
+output: html_notebook
+---
+
+# Overview
+
+This script details the steps for pangenome creation.
+
+* First, plasmids are removed from the genomes for bacterial pangenome construction. 
+
+* Then, pangenomes are created using Panseq with the following settings: with the following settings: fragmentationSize = 5000, minimumNovelRegionSize = 500, novelRegionFinderMode = no_duplicates, percentIdentityCutoff = 60, runMode = pan, storeAlleles = 1, allelesToKeep = 2, frameshift = 1, overwrite = 1, maxNumberResultsInMemory = 500, blastWordSize = 11, nucB = 200, nucC = 65, nucD = 0.12, nucG = 90, nucL = 20, cdhit = 0, sha1 = 0
+
+* The last step subsets the core pangenome loci based on a user defined conservation threshold. 
+
+
+
+# Prepare genome panel for pangenome
+
+Remove plasmid sequences from bacterial genomes.
+
+Input file: whole genome fasta files.
+
+Output file: merged fasta of all genomes, one fasta sequence per genome.
+
+```{bash eval=FALSE}
+# Unzip all .fna.gz files
+for file in *.fna.gz
+do
+  gunzip "$file"
+done
+
+# Merge all .fna files into one
+cat *.fna > merged.fna
+
+# Remove plasmid sequences
+awk '/^>/ { ok = !/plasmid/ } { if (ok) print }' merged.fna > merged_filtered.fna
+```
+
+
+
+# Run Panseq
+
+Settings text file defines the run parameters.
+
+For the Pseudomonas and Zymo pangenome choose:
+percentIdentityCutoff= 60
+coreGenomeThreshold= 16 (88% of 18 = 16)
+
+Input files: fasta file of all genomes.
+
+Output files: locus_alleles.fasta details the pangenome loci sequences. 
+
+```{bash eval=FALSE}
+
+conda activate panseq
+sbatch -c 40 --wrap="perl /home/luzia/Panseq_home/Panseq/lib/panseq.pl /data/luzia/Panseq_settings_zymo.txt"
+
+sbatch -c 40 --wrap="perl /home/luzia/Panseq_home/Panseq/lib/panseq.pl /data/luzia/Panseq_settings_pseudomonas.txt"
+
+```
+
+
+
+# Extract core loci
+
+Input file: locus_alleles.fasta, pangenome loci calculated by Panseq.
+
+Output file: Core_loci_seq.fasta, multifasta file of core loci sequences as defined by core loci threshold.
+
+```{r eval=FALSE}
+#### set parameters
+n_genome <- 16 # Number of genomes to be considered core loci (choose around 88% of total genomes, here 16/20)
+
+
+#### libraries
+library(stringr)
+library(tidyr)
+
+#### read in files
+loci <- read.table("locus_alleles.fasta", header = F, sep = "\t", stringsAsFactors = F)
+
+#### extract core loci
+
+# reformat loci table: first column with loci name, second columns with complete fasta informations
+loci_form <- data.frame(cbind(loci = loci[,1], seq = loci[,1]))
+loci_form$loci[str_detect(string = loci_form$loci, pattern = "Locus", negate = T)] <- NA
+loci_form <- loci_form %>% fill(loci)
+write.table(loci_form, file = "loci_table.txt", quote = F, sep = "\t", row.names = F, col.names = F)
+
+# define core loci (loci that are found in all genomes)
+# to count core loci, remove allele sequences (that is if one genome has several sequences that match this fragment)
+system("sed '/a2/,/^/d' < loci_table.txt > loci_table_woA.txt") 
+loci_form_woA <- read.table("loci_table_woA.txt", header = F, sep = "\t", stringsAsFactors = F)
+colnames(loci_form_woA) <- c("loci", "seq")
+min_lines <- 1+n_genome*2 # core loci have n_genome sequences (each fasta has two lines -> n_genome*2, plus 1 line loci header)
+lines_per_loci <- data.frame(table(as.character(loci_form_woA$loci)))
+core_loci_names <- as.character(lines_per_loci[lines_per_loci$Freq>=min_lines,1])
+# extract core loci from loci table
+core_loci <- loci_form[loci_form$loci %in% core_loci_names,]
+
+
+#### export core loci
+write.table(core_loci$seq, file = "Core_loci_seq.fasta", quote = F, row.names = F, col.names = F)
+```

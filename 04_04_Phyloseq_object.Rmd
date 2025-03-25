@@ -1,0 +1,77 @@
+---
+title: "Create phyloseq objects"
+output: html_notebook
+---
+
+# Create phyloseq objects
+
+```{r eval=FALSE}
+library("dplyr")
+library("phyloseq")
+
+### create phyloseq objects for each amplicon 
+### Input is the dada2 output seq table
+
+# read meta data
+setwd(HOME_LOCAL)
+meta <- data.table::fread("Labels.txt", stringsAsFactors = F, colClasses = c(rep("character",15),rep("integer",2)) )
+barcodes <- data.table::fread("Barcodes.txt")
+
+# combine meta and borcode info
+barcodes_Fwd <- barcodes[barcodes$Orientation=="Frw",c(1:2)]
+colnames(barcodes_Fwd) <- c("Barcode_Nr_Fwd","Barcode_id_Fwd")
+
+barcodes_Rev <- barcodes[barcodes$Orientation=="Rev",c(1:2)]
+colnames(barcodes_Rev) <- c("Barcode_Nr_Rev","Barcode_id_Rev")
+
+meta <- left_join(meta, barcodes_Fwd, by=c("Barcode_Nr_Fwd"="Barcode_Nr_Fwd"))
+meta <- left_join(meta, barcodes_Rev, by=c("Barcode_Nr_Rev"="Barcode_Nr_Rev"))
+
+
+# read in asv table and phylo tree for each amplicon
+
+setwd(paste(HOME_LOCAL, "Dataset1_dada2_workflow", sep = "/"))
+
+for(amp in c("LSP48_LSP49", "LSP31_LSP41", "LSP36_LSP46","LSP08_LSP10", "LSP15_LSP16", "LSP23_LSP24")){
+
+  # create file name column to merge later
+  meta$file_run1 <- paste("m64141e_210513_212412.reads.split.", meta$Barcode_id_Fwd, "--", meta$Barcode_id_Rev, ".", amp, ".fastq", sep = "")
+  meta$file_run2 <- paste("m64141e_221218_125051.hifi_reads.split.", meta$Barcode_id_Fwd, "--", meta$Barcode_id_Rev, ".", amp, ".fastq", sep = "")
+
+  meta1 <- data.frame(meta, row.names = meta$file_run1)
+  meta1 <- meta1[meta1$Sample_type=="L",]
+  meta2 <- data.frame(meta, row.names = meta$file_run2)
+  meta_all <- rbind(meta1, meta2)
+  meta_all <- meta_all %>% mutate_if(is.character, as.factor)
+
+  # read seqtable (sequence counts per sample)
+  asv <- data.table::fread(paste(amp,"asv_table_pool.txt", sep = "_"))
+  row.names(asv) <- as.character(asv$V1)
+  asv <- asv %>% select(-V1)
+
+  # read fasta to connect sequences with asv names
+  asv_names <- read.table(paste(amp,"asv.fa", sep = "_"), header = F)
+  asv_names <- data.frame(header = sub(asv_names[seq(1, nrow(asv_names)-1, by = 2),1], pattern = ">", replacement = ""),
+                         sequence = asv_names[seq(2, nrow(asv_names), by = 2),1] )
+
+  # rename seqtable sequences to asv names for more readability later
+  col_headers <- data.frame(col_header = colnames(asv))
+  col_headers <- left_join(col_headers, asv_names, by = c("col_header" = "sequence"))
+  colnames(asv) <- as.character(col_headers$header)
+
+  # format seqtable as matrix with samples in columns, sequences in rows 
+  asv <- as.matrix(asv, rownames = row.names(asv))
+  asv_t <- t(asv)
+  
+  # make phyloseq object
+  otu <- otu_table(asv_t, taxa_are_rows = T)
+  samples <- sample_data(meta_all)
+  
+  physeq <- phyloseq(otu, samples)
+
+  gdata::mv(from = "physeq", to = paste("physeq", amp, sep = "_"))
+  gdata::mv(from = "meta_all", to = paste("meta_all", amp, sep = "_"))
+
+}
+
+```
